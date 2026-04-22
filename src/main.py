@@ -1,7 +1,17 @@
-import time
-import sys
 import os
+import sys
 import threading
+import time
+import importlib.util
+
+# DLL resolution fix for Python 3.8+ on Windows
+if os.name == 'nt' and hasattr(os, 'add_dll_directory'):
+    spec = importlib.util.find_spec('pydualsense')
+    if spec and spec.origin:
+        ds_dir = os.path.dirname(spec.origin)
+        if os.path.isdir(ds_dir):
+            os.add_dll_directory(ds_dir)
+
 from PySide6.QtCore import QTimer
 
 # Add src to path for imports
