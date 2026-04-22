@@ -1,0 +1,4 @@
+pydualsense
+vgamepad
+PySide6
+hidapi
