@@ -85,16 +85,23 @@ class HidHideManager:
             # Fallback to line-based parsing
             return output.splitlines()
 
-    def hide_dualsense_edge(self):
+    def hide_controllers(self):
         """
-        Attempts to find DualSense Edge (VID: 054C, PID: 0DF2 or 0CE6) 
-        and add it to the hidden list.
+        Attempts to find supported controllers and add them to the hidden list.
+        - DualSense/Edge: 054C:0DF2, 054C:0CE6
+        - DualShock 4: 054C:05C4, 054C:09CC
+        - Xbox One/Series: 045E:02D1, 045E:02DD, 045E:02E3, 045E:02EA, 045E:0B00, 045E:0B0A, 045E:0B12, 045E:0B13
         """
         output = self._run_cmd(["--dev-gaming"])
         if not output:
             return False
 
-        target_ids = ["054C:0DF2", "054C:0CE6"]
+        target_ids = [
+            "054C:0DF2", "054C:0CE6", # DS5/Edge
+            "054C:05C4", "054C:09CC", # DS4
+            "045E:02D1", "045E:02DD", "045E:02E3", "045E:02EA", # Xbox One/Series
+            "045E:0B00", "045E:0B0A", "045E:0B12", "045E:0B13"  # Xbox Elite/Core
+        ]
         found_paths = []
 
         try:

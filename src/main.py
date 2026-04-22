@@ -8,25 +8,25 @@ from PySide6.QtCore import QTimer
 sys.path.append(os.path.dirname(__file__))
 
 import vgamepad as vg
-from pydualsense import pydualsense, DSState
 from filter_engine import FilterEngine
 from virtual_gamepad import VirtualGamepad
 from gui import run_gui
 from hidhide_manager import HidHideManager
+from controllers import ControllerFactory
 
 class FilterWrapper:
     def __init__(self):
-        # 0. Initialize HidHide (Auto-hiding and Whitelisting)
+        # 0. Initialize HidHide
         self.hidhide = HidHideManager()
         if self.hidhide.is_installed():
             print("HidHide detected. Auto-configuring for exclusive access...")
             self.hidhide.setup_whitelisting()
-            self.hidhide.hide_dualsense_edge()
+            self.hidhide.hide_controllers()
         else:
             print("WARNING: HidHide not found. You may experience 'double input' in some games.")
 
-        # 1. Initialize pydualsense
-        self.ds = pydualsense()
+        # 1. Initialize Controller
+        self.controller = None
         
         # 2. RC Filter Engines
         self.left_filter = FilterEngine(deadzone=0.0)
@@ -42,16 +42,16 @@ class FilterWrapper:
         self.current_sticks = (0.0, 0.0, 0.0, 0.0)
         self.config_lock = threading.Lock()
         
-        # Mapping table: pydualsense attributes -> vgamepad buttons
+        # Unified mapping table: ControllerState names -> vgamepad buttons
         self.button_map = {
-            'cross': vg.XUSB_BUTTON.XUSB_GAMEPAD_A,
-            'circle': vg.XUSB_BUTTON.XUSB_GAMEPAD_B,
-            'square': vg.XUSB_BUTTON.XUSB_GAMEPAD_X,
-            'triangle': vg.XUSB_BUTTON.XUSB_GAMEPAD_Y,
+            'A': vg.XUSB_BUTTON.XUSB_GAMEPAD_A,
+            'B': vg.XUSB_BUTTON.XUSB_GAMEPAD_B,
+            'X': vg.XUSB_BUTTON.XUSB_GAMEPAD_X,
+            'Y': vg.XUSB_BUTTON.XUSB_GAMEPAD_Y,
             'L1': vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_SHOULDER,
             'R1': vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_SHOULDER,
-            'share': vg.XUSB_BUTTON.XUSB_GAMEPAD_BACK,
-            'options': vg.XUSB_BUTTON.XUSB_GAMEPAD_START,
+            'Back': vg.XUSB_BUTTON.XUSB_GAMEPAD_BACK,
+            'Start': vg.XUSB_BUTTON.XUSB_GAMEPAD_START,
             'L3': vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB,
             'R3': vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_THUMB,
         }
@@ -66,77 +66,76 @@ class FilterWrapper:
                 f.smoothing = config.get('smoothing', 0.5)
 
     def run_loop(self):
-        print("Initializing DualSense Edge via pydualsense...")
+        print("Searching for controller...")
         try:
             # Initialize connection
             while self.running:
-                try:
-                    self.ds.init()
-                    print("DualSense Edge Connected!")
+                self.controller = ControllerFactory.get_controller()
+                if self.controller:
+                    print(f"Controller Connected!")
                     break
-                except Exception as e:
-                    print(f"Waiting for controller... ({e})")
-                    time.sleep(2.0)
+                time.sleep(1.0)
             
             # Main Processing Loop
             loop_count = 0
-            while self.running and self.ds.device:
-                # 1. Read Raw Sticks (-128 to 127 -> -1.0 to 1.0)
-                state = self.ds.state
+            while self.running and self.controller:
+                # 1. Read Raw State
+                if not self.controller.read():
+                    print("Controller read failed, reconnecting...")
+                    self.controller = None
+                    while self.running and not self.controller:
+                        self.controller = ControllerFactory.get_controller()
+                        time.sleep(1.0)
+                    continue
                 
-                # Center is around 128 unsigned or 0 signed. pydualsense handles signed.
-                lx_norm = state.LX / 128.0
-                ly_norm = state.LY / 128.0
-                rx_norm = state.RX / 128.0
-                ry_norm = state.RY / 128.0
+                state = self.controller.state
                 
                 # 2. Apply RC Filtering
                 with self.config_lock:
-                    # Invert Y (In pydualsense, Y+ is Down, VGamepad Y+ is Up)
-                    plx, ply = self.left_filter.process(lx_norm, -ly_norm)
-                    prx, pry = self.right_filter.process(rx_norm, -ry_norm)
+                    # Controller classes should already provide normalized sticks (-1.0 to 1.0)
+                    # Note: Most controllers use Y+ as Down in raw data, we normalize to Y+ as Up
+                    # But some libraries like pygame might already invert it.
+                    # BaseController implementations should handle normalization.
+                    plx, ply = self.left_filter.process(state.LX, -state.LY)
+                    prx, pry = self.right_filter.process(state.RX, -state.RY)
                 
                 self.current_sticks = (plx, ply, prx, pry)
                 
-                # Debug output every 500ms approx
-                loop_count += 1
-                if loop_count % 250 == 0:
-                    print(f"Debug [Loop {loop_count}]: Raw_LX={state.LX:4d} Filtered_LX={plx:+.2f} | L2={state.L2_value:3d}")
-
                 # 3. Output to Virtual Gamepad
                 if not self.monitor_mode:
                     # Sticks
                     self.vgamepad.update_sticks(plx, ply, prx, pry)
                     
                     # Triggers (Ensure values are within 0-255)
-                    self.vgamepad.gamepad.left_trigger(value=int(state.L2_value))
-                    self.vgamepad.gamepad.right_trigger(value=int(state.R2_value))
+                    self.vgamepad.gamepad.left_trigger(value=int(state.L2 * 255))
+                    self.vgamepad.gamepad.right_trigger(value=int(state.R2 * 255))
                     
                     # Buttons
-                    for ds_attr, xbox_btn in self.button_map.items():
-                        val = getattr(state, ds_attr, False)
+                    for btn_name, xbox_btn in self.button_map.items():
+                        val = state.buttons.get(btn_name, False)
                         if val:
                             self.vgamepad.gamepad.press_button(button=xbox_btn)
                         else:
                             self.vgamepad.gamepad.release_button(button=xbox_btn)
                     
                     # D-Pad
-                    if state.DpadUp: self.vgamepad.gamepad.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP)
+                    dx, dy = state.dpad
+                    if dy > 0: self.vgamepad.gamepad.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP)
                     else: self.vgamepad.gamepad.release_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP)
                     
-                    if state.DpadDown: self.vgamepad.gamepad.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN)
+                    if dy < 0: self.vgamepad.gamepad.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN)
                     else: self.vgamepad.gamepad.release_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN)
                     
-                    if state.DpadLeft: self.vgamepad.gamepad.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_LEFT)
+                    if dx < 0: self.vgamepad.gamepad.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_LEFT)
                     else: self.vgamepad.gamepad.release_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_LEFT)
                     
-                    if state.DpadRight: self.vgamepad.gamepad.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT)
+                    if dx > 0: self.vgamepad.gamepad.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT)
                     else: self.vgamepad.gamepad.release_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT)
                     
                     # Apply all changes
                     self.vgamepad.apply()
                 
-                # Stable frequency (1000Hz / 1ms)
+                # Stable frequency
                 time.sleep(0.001)
                 
         except Exception as e:
@@ -144,7 +143,8 @@ class FilterWrapper:
             import traceback
             traceback.print_exc()
         finally:
-            self.ds.close()
+            if self.controller:
+                self.controller.close()
             print("Processing thread stopped.")
 
 def main():
@@ -166,13 +166,13 @@ def main():
             lx, ly, rx, ry = wrapper.current_sticks
             window.update_visuals(lx, ly, rx, ry)
             
-            # Periodically update HidHide status (every 2 seconds or so)
+            # Periodically update HidHide status
             if hasattr(update_viz, "hh_counter"):
                 update_viz.hh_counter += 1
             else:
                 update_viz.hh_counter = 0
             
-            if update_viz.hh_counter % 120 == 0: # Approx 2 seconds at 60fps
+            if update_viz.hh_counter % 120 == 0: 
                 window.update_hidhide_status(
                     wrapper.hidhide.is_installed(),
                     wrapper.hidhide.get_cloak_state(),
@@ -182,11 +182,11 @@ def main():
         # Connect HidHide signals
         window.signals.hidhide_toggle_cloak.connect(wrapper.hidhide.set_cloak)
         window.signals.hidhide_whitelist_self.connect(wrapper.hidhide.setup_whitelisting)
-        window.signals.hidhide_auto_setup.connect(wrapper.hidhide.hide_dualsense_edge)
+        window.signals.hidhide_auto_setup.connect(wrapper.hidhide.hide_controllers)
 
         timer = QTimer()
         timer.timeout.connect(update_viz)
-        timer.start(16) # 60 FPS visual update
+        timer.start(16) 
         
         print("GUI started. Close the window to stop.")
         code = app.exec()
@@ -206,7 +206,7 @@ def main():
     
     # Restore HidHide state on exit
     if wrapper.hidhide.is_installed():
-        print("Restoring controller visibility (Disabling HidHide)...")
+        print("Restoring controller visibility...")
         wrapper.hidhide.disable_hiding()
         
     sys.exit(code)

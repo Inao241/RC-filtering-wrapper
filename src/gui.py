@@ -90,7 +90,7 @@ class JoystickDisplay(QWidget):
 class RCFilterGUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DualSense Edge RC Filter Tuner")
+        self.setWindowTitle("Universal RC Filter Tuner")
         self.setMinimumWidth(600)
         
         self.signals = ConfigSignals()
@@ -147,7 +147,7 @@ class RCFilterGUI(QMainWindow):
         self.hh_status = QLabel("Status: Unknown")
         self.cloak_cb = QCheckBox("Enable Cloaking")
         self.whitelist_btn = QPushButton("Whitelist Current App")
-        self.auto_btn = QPushButton("Auto-Hide DualSense")
+        self.auto_btn = QPushButton("Auto-Hide Controllers")
         
         hh_layout.addWidget(self.hh_status)
         hh_layout.addWidget(self.cloak_cb)

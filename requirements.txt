@@ -2,3 +2,4 @@ pydualsense
 vgamepad
 PySide6
 hidapi
+pygame
