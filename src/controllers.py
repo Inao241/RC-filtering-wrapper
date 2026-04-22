@@ -162,51 +162,88 @@ class GenericController(BaseController):
         if not pygame.joystick.get_init():
             pygame.joystick.init()
             
-        if pygame.joystick.get_count() > 0:
-            self.joystick = pygame.joystick.Joystick(0)
-            self.joystick.init()
-            print(f"Generic Controller Initialized: {self.joystick.get_name()}")
-            return True
+        pygame.event.pump()
+        count = pygame.joystick.get_count()
+        if count > 0:
+            print(f"Detected {count} joysticks.")
+            
+            # Find the best candidate:
+            # If multiple controllers, prefer the one that ISN'T named exactly like a generic "Xbox 360 Controller" 
+            # OR pick the one that is NOT index 0 if index 0 is suspicious.
+            # Actually, most physical controllers have non-zero GUIDs.
+            candidate = None
+            for i in range(count):
+                js = pygame.joystick.Joystick(i)
+                js.init()
+                name = js.get_name()
+                guid = js.get_guid()
+                print(f"Joystick {i}: {name} (GUID: {guid})")
+                
+                # Heuristic: Virtual Xbox 360 controllers from ViGEmBus often have 
+                # a very specific GUID or generic name. 
+                # If we have two Xbox controllers, the one with index 0 is usually the older one.
+                # If we're starting fresh, index 0 is likely the physical one.
+                # BUT if we restarted, index 0 might be the virtual one left over.
+                
+                # For now, let's take the one that is NOT the last one if count > 1?
+                # Actually, a better way: Pick the one that has valid axis 4/5 (Triggers) 
+                # initialized to -1.0 (typical for physical).
+                if js.get_numaxes() >= 6:
+                    t1 = js.get_axis(4)
+                    if t1 < -0.9: # Physical Xbox triggers idle at -1.0
+                        print(f"-> Selected {i} as physical candidate based on trigger idle state.")
+                        candidate = js
+                        break
+                
+                if not candidate:
+                    candidate = js
+            
+            if candidate:
+                self.joystick = candidate
+                print(f"Final Selection: {self.joystick.get_name()}")
+                return True
         return False
         
     def read(self):
         if not self.joystick: return False
         pygame.event.pump()
         
-        # Note: Axis mapping varies, this is standard Xbox layout for Pygame
-        self.state.LX = self.joystick.get_axis(0)
-        self.state.LY = self.joystick.get_axis(1)
-        self.state.RX = self.joystick.get_axis(2)
-        self.state.RY = self.joystick.get_axis(3)
-        
-        # Triggers: In many mappings, L2 is axis 4, R2 is axis 5 (range -1 to 1)
-        # We'll try to detect common mappings
-        if self.joystick.get_numaxes() >= 6:
-            l2_raw = self.joystick.get_axis(4)
-            r2_raw = self.joystick.get_axis(5)
-            # Normalize from [-1, 1] to [0, 1]
-            self.state.L2 = (l2_raw + 1.0) / 2.0
-            self.state.R2 = (r2_raw + 1.0) / 2.0
-        
-        # Buttons
-        num_buttons = self.joystick.get_numbuttons()
-        # Common Xbox Mapping: 0:A, 1:B, 2:X, 3:Y, 4:Back, 6:Start, 7:L3, 8:R3, 9:LB, 10:RB
-        btn_map = {
-            'A': 0, 'B': 1, 'X': 2, 'Y': 3,
-            'L1': 4, 'R1': 5,
-            'Back': 6, 'Start': 7,
-            'L3': 8, 'R3': 9,
-            'Guide': 10
-        }
-        for name, idx in btn_map.items():
-            if idx < num_buttons:
-                self.state.buttons[name] = self.joystick.get_button(idx)
-        
-        # D-Pad (Hat)
-        if self.joystick.get_numhats() > 0:
-            self.state.dpad = self.joystick.get_hat(0)
+        try:
+            # Axis mapping for Xbox 360/One controllers on Windows
+            # 0:LX, 1:LY, 2:RX, 3:RY, 4:LT, 5:RT
+            self.state.LX = self.joystick.get_axis(0)
+            self.state.LY = self.joystick.get_axis(1)
             
-        return True
+            # Some older controllers or drivers map RX/RY differently
+            num_axes = self.joystick.get_numaxes()
+            if num_axes >= 4:
+                self.state.RX = self.joystick.get_axis(2)
+                self.state.RY = self.joystick.get_axis(3)
+            
+            # Triggers
+            if num_axes >= 6:
+                # LT/RT range is -1.0 (idle) to 1.0 (pressed)
+                l2_raw = self.joystick.get_axis(4)
+                r2_raw = self.joystick.get_axis(5)
+                self.state.L2 = max(0.0, (l2_raw + 1.0) / 2.0)
+                self.state.R2 = max(0.0, (r2_raw + 1.0) / 2.0)
+            
+            # Buttons
+            num_buttons = self.joystick.get_numbuttons()
+            # Standard Xbox: 0:A, 1:B, 2:X, 3:Y, 4:LB, 5:RB, 6:Back, 7:Start, 8:LS, 9:RS
+            btn_map = {'A':0, 'B':1, 'X':2, 'Y':3, 'L1':4, 'R1':5, 'Back':6, 'Start':7, 'L3':8, 'R3':9}
+            for name, idx in btn_map.items():
+                if idx < num_buttons:
+                    self.state.buttons[name] = bool(self.joystick.get_button(idx))
+            
+            # D-Pad
+            if self.joystick.get_numhats() > 0:
+                self.state.dpad = self.joystick.get_hat(0)
+                
+            return True
+        except Exception as e:
+            print(f"Read error: {e}")
+            return False
         
     def close(self):
         if self.joystick:

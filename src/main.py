@@ -30,8 +30,10 @@ class FilterWrapper:
         self.hidhide = HidHideManager()
         if self.hidhide.is_installed():
             print("HidHide detected. Auto-configuring for exclusive access...")
+            # CRITICAL: Whitelist the python executable BEFORE hiding anything
             self.hidhide.setup_whitelisting()
             self.hidhide.hide_controllers()
+            print("HidHide: Python whitelisted and controllers hidden.")
         else:
             print("WARNING: HidHide not found. You may experience 'double input' in some games.")
 
@@ -42,11 +44,11 @@ class FilterWrapper:
         self.left_filter = FilterEngine(deadzone=0.0)
         self.right_filter = FilterEngine(deadzone=0.0)
         
-        # 3. Virtual Xbox Gamepad
-        self.vgamepad = VirtualGamepad()
+        # 3. Virtual Xbox Gamepad Placeholder
+        self.vgamepad = None
         
         self.running = True
-        self.monitor_mode = not self.vgamepad.gamepad
+        self.monitor_mode = True
         
         # Shared state for GUI
         self.current_sticks = (0.0, 0.0, 0.0, 0.0)
@@ -86,8 +88,12 @@ class FilterWrapper:
                     break
                 time.sleep(1.0)
             
+            # 3. Virtual Xbox Gamepad - Initialize AFTER we find the physical one
+            # to avoid picking up ourselves in Pygame
+            self.vgamepad = VirtualGamepad()
+            self.monitor_mode = not self.vgamepad.gamepad
+            
             # Main Processing Loop
-            loop_count = 0
             while self.running and self.controller:
                 # 1. Read Raw State
                 if not self.controller.read():
@@ -102,14 +108,21 @@ class FilterWrapper:
                 
                 # 2. Apply RC Filtering
                 with self.config_lock:
-                    # Controller classes should already provide normalized sticks (-1.0 to 1.0)
-                    # Note: Most controllers use Y+ as Down in raw data, we normalize to Y+ as Up
-                    # But some libraries like pygame might already invert it.
-                    # BaseController implementations should handle normalization.
+                    # Note: Pygame sticks use Y- as Up. Our filter usually wants Y+ as Up.
+                    # Standard Xbox/Generic: Up is -1.0, Down is 1.0. 
+                    # We negate state.LY/RY to get Up as +1.0.
                     plx, ply = self.left_filter.process(state.LX, -state.LY)
                     prx, pry = self.right_filter.process(state.RX, -state.RY)
                 
                 self.current_sticks = (plx, ply, prx, pry)
+                
+                # Debug output every 500ms if sticks are moving
+                if abs(state.LX) > 0.1 or abs(state.LY) > 0.1:
+                     # Using a simple counter for rate limiting
+                     if not hasattr(self, "_dbg_tick"): self._dbg_tick = 0
+                     self._dbg_tick += 1
+                     if self._dbg_tick % 100 == 0:
+                         print(f"RAW INPUT: LX={state.LX:.2f} LY={state.LY:.2f} | PROCESSED: {plx:.2f} {ply:.2f}")
                 
                 # 3. Output to Virtual Gamepad
                 if not self.monitor_mode:
